@@ -1,4 +1,4 @@
-# \U0001F50D Search Agent
+# Search Agent
 
 A small, readable codebase for learning how to build a **search agent** with
 [Pydantic AI](https://ai.pydantic.dev/), **Postgres**, and **pgvector**.
