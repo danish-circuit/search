@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
@@ -103,106 +102,50 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
             async for node in run:
                 if Agent.is_model_request_node(node):
                     # A model turn: stream its text deltas as they arrive.
+                    turn_had_text = False
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
                             if isinstance(event, PartStartEvent) and isinstance(
                                 event.part, TextPart
                             ):
                                 if event.part.content:
+                                    turn_had_text = True
                                     yield {"event": "token", "data": event.part.content}
                             elif isinstance(event, PartDeltaEvent) and isinstance(
                                 event.delta, TextPartDelta
                             ):
                                 if event.delta.content_delta:
+                                    turn_had_text = True
                                     yield {"event": "token", "data": event.delta.content_delta}
+                    # Separate this turn's text from whatever comes next (the next
+                    # turn or the final answer), so markdown headings/lists that
+                    # begin a turn render correctly instead of gluing on.
+                    if turn_had_text:
+                        yield {"event": "token", "data": "\n\n"}
                 elif Agent.is_call_tools_node(node):
                     # The agent decided to call tools: announce which ones.
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
                             if isinstance(event, FunctionToolCallEvent):
-                                yield {
-                                    "event": "tool",
-                                    "data": event.part.tool_name,
-                                }
+                                # Include the search query the agent passed in.
+                                args = event.part.args_as_dict()
+                                query = args.get("query", "")
+                                label = event.part.tool_name
+                                if query:
+                                    label = f"{label}({query})"
+                                yield {"event": "tool", "data": label}
         yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_stream())
 
 
 # --------------------------------------------------------------------------- #
-# A tiny built-in UI so students can poke at it without writing a client.      #
+# Config (the Streamlit frontend reads this to know which features are on)      #
 # --------------------------------------------------------------------------- #
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    # Show the HyDE option in the method dropdown only when it's enabled.
-    hyde_option = "<option>hyde</option>" if settings.hyde_enabled else ""
-    return _INDEX_HTML.replace("{{HYDE_OPTION}}", hyde_option)
-
-
-_INDEX_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Search Agent</title>
-<style>
- body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}
- textarea,input,select,button{font:inherit} h2{margin-top:2rem}
- #answer{white-space:pre-wrap;background:#f5f5f5;padding:1rem;border-radius:8px;min-height:3rem}
- .row{display:flex;gap:.5rem;margin:.5rem 0} .row>*{flex:1}
- pre{background:#f5f5f5;padding:1rem;border-radius:8px;overflow:auto}
-</style></head><body>
-<h1>\U0001F50D Search Agent</h1>
-
-<h2>1. Ingest a PDF</h2>
-<input type="file" id="pdf" accept="application/pdf">
-<button onclick="ingest()">Upload</button>
-<div id="ingestOut"></div>
-
-<h2>2. Ask the agent (streaming)</h2>
-<div class="row"><input id="q" placeholder="Ask a question..."></div>
-<button onclick="ask()">Ask</button>
-<div id="answer"></div>
-
-<h2>3. Compare raw search methods</h2>
-<div class="row">
-  <input id="sq" placeholder="Search query...">
-  <select id="method">
-    <option>hybrid</option><option>semantic</option><option>lexical</option>{{HYDE_OPTION}}
-  </select>
-  <button onclick="doSearch()">Search</button>
-</div>
-<pre id="searchOut"></pre>
-
-<script>
-async function ingest(){
-  const f=document.getElementById('pdf').files[0];
-  if(!f){return}
-  const fd=new FormData(); fd.append('file',f);
-  document.getElementById('ingestOut').textContent='Uploading...';
-  const r=await fetch('/ingest',{method:'POST',body:fd});
-  document.getElementById('ingestOut').textContent=JSON.stringify(await r.json());
-}
-async function ask(){
-  const msg=document.getElementById('q').value;
-  const out=document.getElementById('answer'); out.textContent='';
-  const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({message:msg})});
-  const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
-  while(true){
-    const {value,done}=await reader.read(); if(done)break;
-    buf+=dec.decode(value,{stream:true});
-    const parts=buf.split('\\n\\n'); buf=parts.pop();
-    for(const p of parts){
-      const ev={}; p.split('\\n').forEach(l=>{
-        const i=l.indexOf(': '); if(i>0) ev[l.slice(0,i)]=l.slice(i+2);
-      });
-      if(ev.event==='tool' && ev.data) out.textContent+=`\U0001F527 [${ev.data}]\n`;
-      if(ev.event==='token' && ev.data) out.textContent+=ev.data;
-    }
-  }
-}
-async function doSearch(){
-  const q=document.getElementById('sq').value;
-  const m=document.getElementById('method').value;
-  const r=await fetch(`/search?q=${encodeURIComponent(q)}&method=${m}`);
-  document.getElementById('searchOut').textContent=JSON.stringify(await r.json(),null,2);
-}
-</script>
-</body></html>"""
+@app.get("/config")
+async def config() -> dict:
+    """Expose feature flags so the frontend can adapt (e.g. hide HyDE)."""
+    methods = ["lexical", "semantic", "hybrid"]
+    if settings.hyde_enabled:
+        methods.append("hyde")
+    return {"hyde_enabled": settings.hyde_enabled, "methods": methods}

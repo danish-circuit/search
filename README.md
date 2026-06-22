@@ -17,11 +17,14 @@ A Claude (Opus) agent is given all four as tools and decides which to use.
 ## Architecture
 
 ```
-                 FastAPI (one service)
+  Streamlit frontend  (http://localhost:8501)
+        │  HTTP
+        ▼
+  FastAPI backend     (http://localhost:8000)
   POST /ingest  ── upload a PDF, index it
   POST /chat    ── streaming agent answer (SSE)
   GET  /search  ── run one search method directly (great for demos)
-  GET  /        ── tiny built-in web UI
+  GET  /config  ── feature flags the frontend reads
         │
         ▼
   Postgres 16 + pgvector
@@ -29,6 +32,8 @@ A Claude (Opus) agent is given all four as tools and decides which to use.
    • HNSW index  -> semantic search
    • GIN tsvector index -> lexical search
 ```
+
+Three Docker services (`db`, `api`, `frontend`) built from one image.
 
 Everything runs in Docker. The only things you provide are two API keys.
 
@@ -42,8 +47,9 @@ cp .env.example .env
 # 2. Bring it up
 docker compose up --build
 
-# 3. Open the UI
-open http://localhost:8000/
+# 3. Open the Streamlit UI
+open http://localhost:8501/
+#    (the FastAPI backend is at http://localhost:8000, e.g. /docs)
 ```
 
 On first boot, `db/init.sql` runs automatically and creates the schema + indexes.
@@ -83,6 +89,7 @@ Files are small and heavily commented. A good reading order for the talk:
 4. **`app/agent.py`** — wiring the search methods up as Pydantic AI tools.
 5. **`app/main.py`** — the FastAPI endpoints and SSE streaming.
 6. **`db/init.sql`** — the schema and the two indexes that make search fast.
+7. **`frontend/streamlit_app.py`** — the Streamlit UI (a thin client over the API).
 
 ## Configuration
 
@@ -98,8 +105,11 @@ docker compose down -v && docker compose up --build
 
 ```bash
 uv sync
-# point DATABASE_URL at a local pgvector instance, then:
+# point DATABASE_URL at a local pgvector instance, then start the backend:
 uv run uvicorn app.main:app --reload
+
+# in another shell, start the frontend (API_URL defaults to localhost:8000):
+uv run streamlit run frontend/streamlit_app.py
 ```
 
 ## Notes & caveats (it's a teaching repo!)
