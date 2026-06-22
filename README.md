@@ -101,6 +101,24 @@ really only need the two API keys. If you change the embedding model, update
 docker compose down -v && docker compose up --build
 ```
 
+## Evaluating the agent
+
+The [`evaluator/`](evaluator/) directory adds a **Dagster** harness that scores
+the agent with LLM-as-judge metrics (RAGAS-style) and records everything in
+**Opik** for inspection. It runs as part of the same `docker compose` stack.
+
+```bash
+make opik                 # start a local Opik instance (UI at :5173)
+docker compose up --build  # brings up the evaluator services too
+open http://localhost:3001 # the Dagster UI -- run the `index`, then `evaluate` job
+```
+
+The `index` job pulls a small ViDoRe v3 subset (≤10 PDFs), the `evaluate` job
+asks ~15 questions and judges the answers + retrieved context. Agent runs are
+traced to Opik automatically (one trace per `/chat` or `/ask`, with a span per
+search-tool call). See [`evaluator/README.md`](evaluator/README.md) for details.
+
+
 ## Local development (without Docker)
 
 ```bash

@@ -5,3 +5,5 @@ __pycache__/
 venv/
 sample_pdfs/*.pdf
 .ruff_cache/
+# The local Opik instance is cloned here by `make opik`; never commit it.
+opik/

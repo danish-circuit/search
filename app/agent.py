@@ -8,7 +8,7 @@ citations. This is a compact illustration of agentic RAG.
 
 from pydantic_ai import Agent, RunContext
 
-from app import search
+from app import opik, search
 from app.config import settings
 from app.search import SearchResult
 
@@ -46,19 +46,25 @@ def _format(results: list[SearchResult]) -> str:
 @agent.tool
 async def lexical_search(ctx: RunContext, query: str) -> str:
     """Keyword / full-text search. Best for exact terms, names, codes, phrases."""
-    return _format(await search.lexical_search(query))
+    results = await search.lexical_search(query)
+    opik.record_tool_call("lexical_search", query, results)
+    return _format(results)
 
 
 @agent.tool
 async def semantic_search(ctx: RunContext, query: str) -> str:
     """Meaning-based vector search. Best for conceptual or paraphrased questions."""
-    return _format(await search.semantic_search(query))
+    results = await search.semantic_search(query)
+    opik.record_tool_call("semantic_search", query, results)
+    return _format(results)
 
 
 @agent.tool
 async def hybrid_search(ctx: RunContext, query: str) -> str:
     """Blended keyword + vector search (RRF). A safe default when unsure."""
-    return _format(await search.hybrid_search(query))
+    results = await search.hybrid_search(query)
+    opik.record_tool_call("hybrid_search", query, results)
+    return _format(results)
 
 
 # HyDE is opt-out via HYDE_ENABLED. When disabled we don't register the tool at
@@ -71,4 +77,6 @@ if settings.hyde_enabled:
 
         Best for short or vague queries.
         """
-        return _format(await search.hyde_search(query))
+        results = await search.hyde_search(query)
+        opik.record_tool_call("hyde_search", query, results)
+        return _format(results)

@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
 )
 from sse_starlette.sse import EventSourceResponse
 
-from app import db, search
+from app import db, opik, search
 from app.agent import agent
 from app.config import settings
 from app.ingest import ingest_pdf
@@ -98,45 +98,104 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
     """
 
     async def event_stream() -> AsyncIterator[dict]:
-        async with agent.iter(req.message) as run:
-            async for node in run:
-                if Agent.is_model_request_node(node):
-                    # A model turn: stream its text deltas as they arrive.
-                    turn_had_text = False
-                    async with node.stream(run.ctx) as stream:
-                        async for event in stream:
-                            if isinstance(event, PartStartEvent) and isinstance(
-                                event.part, TextPart
-                            ):
-                                if event.part.content:
-                                    turn_had_text = True
-                                    yield {"event": "token", "data": event.part.content}
-                            elif isinstance(event, PartDeltaEvent) and isinstance(
-                                event.delta, TextPartDelta
-                            ):
-                                if event.delta.content_delta:
-                                    turn_had_text = True
-                                    yield {"event": "token", "data": event.delta.content_delta}
-                    # Separate this turn's text from whatever comes next (the next
-                    # turn or the final answer), so markdown headings/lists that
-                    # begin a turn render correctly instead of gluing on.
-                    if turn_had_text:
-                        yield {"event": "token", "data": "\n\n"}
-                elif Agent.is_call_tools_node(node):
-                    # The agent decided to call tools: announce which ones.
-                    async with node.stream(run.ctx) as stream:
-                        async for event in stream:
-                            if isinstance(event, FunctionToolCallEvent):
-                                # Include the search query the agent passed in.
-                                args = event.part.args_as_dict()
-                                query = args.get("query", "")
-                                label = event.part.tool_name
-                                if query:
-                                    label = f"{label}({query})"
-                                yield {"event": "tool", "data": label}
+        # Capture the agent's tool calls (and accumulate its answer) so we can
+        # write one Opik trace per chat when tracing is enabled.
+        capture = opik.start_capture()
+        answer_parts: list[str] = []
+        try:
+            async with agent.iter(req.message) as run:
+                async for node in run:
+                    if Agent.is_model_request_node(node):
+                        # A model turn: stream its text deltas as they arrive.
+                        turn_had_text = False
+                        async with node.stream(run.ctx) as stream:
+                            async for event in stream:
+                                if isinstance(event, PartStartEvent) and isinstance(
+                                    event.part, TextPart
+                                ):
+                                    if event.part.content:
+                                        turn_had_text = True
+                                        answer_parts.append(event.part.content)
+                                        yield {"event": "token", "data": event.part.content}
+                                elif isinstance(event, PartDeltaEvent) and isinstance(
+                                    event.delta, TextPartDelta
+                                ):
+                                    if event.delta.content_delta:
+                                        turn_had_text = True
+                                        answer_parts.append(event.delta.content_delta)
+                                        yield {"event": "token", "data": event.delta.content_delta}
+                        # Separate this turn's text from whatever comes next (the next
+                        # turn or the final answer), so markdown headings/lists that
+                        # begin a turn render correctly instead of gluing on.
+                        if turn_had_text:
+                            answer_parts.append("\n\n")
+                            yield {"event": "token", "data": "\n\n"}
+                    elif Agent.is_call_tools_node(node):
+                        # The agent decided to call tools: announce which ones.
+                        async with node.stream(run.ctx) as stream:
+                            async for event in stream:
+                                if isinstance(event, FunctionToolCallEvent):
+                                    # Include the search query the agent passed in.
+                                    args = event.part.args_as_dict()
+                                    query = args.get("query", "")
+                                    label = event.part.tool_name
+                                    if query:
+                                        label = f"{label}({query})"
+                                    yield {"event": "tool", "data": label}
+        finally:
+            tool_calls = opik.stop_capture(capture)
+            opik.write_trace(req.message, "".join(answer_parts).strip(), tool_calls)
         yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_stream())
+
+
+# --------------------------------------------------------------------------- #
+# Ask (non-streaming, traced) -- the entry point the evaluator service uses     #
+# --------------------------------------------------------------------------- #
+class AskRequest(BaseModel):
+    question: str
+
+
+@app.post("/ask")
+async def ask(req: AskRequest) -> dict:
+    """Run the agent to completion and return the answer plus its Opik trace id.
+
+    The evaluator calls this, then fetches the trace's tool spans from Opik and
+    runs its LLM judges. We also return the retrieved chunk texts and document
+    titles inline so the evaluator can score retrieval without a trace round-trip.
+    """
+    capture = opik.start_capture()
+    try:
+        result = await agent.run(req.question)
+        answer = str(result.output)
+    finally:
+        tool_calls = opik.stop_capture(capture)
+    trace_id = opik.write_trace(req.question, answer, tool_calls)
+    run = opik.AgentRun(
+        trace_id=trace_id or "",
+        question=req.question,
+        answer=answer,
+        tool_calls=tool_calls,
+    )
+    return {
+        "question": req.question,
+        "answer": answer,
+        "trace_id": trace_id,
+        "contexts": run.contexts(),
+        "retrieved_titles": run.retrieved_titles(),
+        "tool_calls": [
+            {
+                "name": c.name,
+                "query": c.query,
+                "references": [
+                    {"title": r.title, "chunk_id": r.chunk_id, "score": r.score}
+                    for r in c.results
+                ],
+            }
+            for c in tool_calls
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #

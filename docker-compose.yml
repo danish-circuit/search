@@ -11,6 +11,8 @@ services:
       - pgdata:/var/lib/postgresql/data
       # init.sql runs automatically the first time the data volume is created.
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Creates the separate `dagster` database the evaluator uses for run storage.
+      - ./db/init-dagster.sql:/docker-entrypoint-initdb.d/init-dagster.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U search -d search"]
       interval: 3s
@@ -25,6 +27,13 @@ services:
       # Override DATABASE_URL so it points at the compose service, regardless
       # of what's in .env (which defaults to the same value anyway).
       DATABASE_URL: postgresql://search:search@db:5432/search
+      # Opik tracing. The local Opik instance (started with `make opik`) listens
+      # on the host at :5173; containers reach it via host.docker.internal.
+      # Leave OPIK_URL_OVERRIDE empty (or stop Opik) to disable tracing.
+      OPIK_URL_OVERRIDE: ${OPIK_URL_OVERRIDE:-http://host.docker.internal:5173/api}
+      OPIK_PROJECT_NAME: search-agent
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
@@ -46,6 +55,71 @@ services:
       - "8501:8501"
     depends_on:
       - api
+
+  # --- Evaluation harness (Dagster) -------------------------------------- #
+  # The standard 3-service Dagster topology, all from one image. The code
+  # location serves the job graph; the webserver is the UI; the daemon runs
+  # the queue/schedules.
+  evaluator-code:
+    build:
+      context: ./evaluator
+      target: evaluator-code
+    env_file:
+      - .env
+    environment:
+      API_URL: http://api:8000
+      OPIK_URL_OVERRIDE: ${OPIK_URL_OVERRIDE:-http://host.docker.internal:5173/api}
+      OPIK_PROJECT_NAME: search-agent
+      DAGSTER_PG_USERNAME: search
+      DAGSTER_PG_PASSWORD: search
+      DAGSTER_PG_HOST: db
+      DAGSTER_PG_DB: dagster
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  evaluator:
+    build:
+      context: ./evaluator
+      target: evaluator-webserver
+    env_file:
+      - .env
+    environment:
+      DAGSTER_PG_USERNAME: search
+      DAGSTER_PG_PASSWORD: search
+      DAGSTER_PG_HOST: db
+      DAGSTER_PG_DB: dagster
+    ports:
+      - "3001:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      evaluator-code:
+        condition: service_started
+
+  evaluator-daemon:
+    build:
+      context: ./evaluator
+      target: evaluator-daemon
+    env_file:
+      - .env
+    environment:
+      API_URL: http://api:8000
+      OPIK_URL_OVERRIDE: ${OPIK_URL_OVERRIDE:-http://host.docker.internal:5173/api}
+      OPIK_PROJECT_NAME: search-agent
+      DAGSTER_PG_USERNAME: search
+      DAGSTER_PG_PASSWORD: search
+      DAGSTER_PG_HOST: db
+      DAGSTER_PG_DB: dagster
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      evaluator-code:
+        condition: service_started
 
 volumes:
   pgdata:

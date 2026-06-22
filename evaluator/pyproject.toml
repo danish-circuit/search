@@ -1,0 +1,36 @@
+[project]
+name = "evaluator"
+version = "0.1.0"
+description = "Dagster benchmark + LLM-judge evaluation harness for the search agent"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster>=1.9",
+    "dagster-webserver>=1.9",
+    "dagster-postgres>=0.25",
+    "datasets>=3.0",
+    "reportlab>=4.2",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+    "instructor>=1.6",
+    "anthropic>=0.40",
+    "opik>=2.0",
+    "uuid6>=2024.7",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["evaluator*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
